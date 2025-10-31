@@ -1,0 +1,2 @@
+echo -n "admin123" | shasum -a 256 | awk '{print $1}' > admin.db
+
