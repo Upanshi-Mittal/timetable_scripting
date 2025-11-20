@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # scripts/timetable.sh - universal notifications (macOS + Linux)
 set -u
+
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)/.."
 HELPERS_DIR="$(cd "$(dirname "$0")" && pwd)/helpers"
 
@@ -11,9 +12,11 @@ HELPERS_DIR="$(cd "$(dirname "$0")" && pwd)/helpers"
 DB_USER="timetable_user"
 DB_PASS="Timetable@123"
 DB_NAME="timetable_db"
-MYSQL_CMD="mysql -u${DB_USER} -p${DB_PASS} ${DB_NAME} -N -B -e"
 
-# detect platform for notifications
+# ❌ Removed -e (the cause of your error)
+MYSQL_CMD="mysql -u${DB_USER} -p${DB_PASS} ${DB_NAME} -N -B"
+
+# detect platform
 PLATFORM="$(uname -s)"
 case "$PLATFORM" in
   Darwin) PLATFORM="mac" ;;
@@ -29,6 +32,7 @@ run_sql() {
 notify_user() {
   local title="$1"
   local message="$2"
+
   if [[ "$PLATFORM" == "mac" ]]; then
     if command -v terminal-notifier >/dev/null 2>&1; then
       terminal-notifier -title "$title" -message "$message" || true
@@ -47,11 +51,16 @@ notify_user() {
 send_notification() {
   local batch="$1"
   local message="$2"
+
   notify_user "Timetable Reminder — ${batch}" "${message}"
-  # log into DB (escape single quotes)
+
   local esc=$(echo "$message" | sed "s/'/''/g")
-  run_sql "INSERT INTO NotificationLog(batch_id, message) VALUES ((SELECT batch_id FROM Batch WHERE batch_name='${batch}'), '${esc}');" >/dev/null 2>&1 || true
-  # also append to file log
+
+  run_sql "
+    INSERT INTO NotificationLog(batch_id, message)
+    VALUES ((SELECT batch_id FROM Batch WHERE batch_name='${batch}'), '${esc}');
+  " >/dev/null 2>&1 || true
+
   echo "$(date '+%F %T') | ${batch} | ${message}" >> "${BASE_DIR}/exports/log/reminder.log"
 }
 
@@ -74,7 +83,11 @@ export_today_csv() {
   local batch="$1"; local out="$2"
   mkdir -p "${BASE_DIR}/exports"
   echo "day,start_time,end_time,course_code,course_name,teacher,room" > "$out"
-  ${MYSQL_CMD} "CALL get_today_schedule('${batch}');" | awk -F'\t' '{printf "%s,%s,%s,%s,%s,%s,%s\n",$1,$2,$3,$4,$5,$6,$7}' >> "$out"
+
+  ${MYSQL_CMD} <<EOF | awk -F'\t' '{printf "%s,%s,%s,%s,%s,%s,%s\n",$1,$2,$3,$4,$5,$6,$7}' >> "$out"
+CALL get_today_schedule('${batch}');
+EOF
+
   echo "[INFO] Exported to $out"
 }
 
@@ -82,12 +95,20 @@ cron_check() {
   local batch="$1"
   local row
   row="$(next_class "$batch")" || row=""
-  if [[ -z "$row" ]]; then exit 0; fi
+
+  [[ -z "$row" ]] && exit 0
+
   IFS=$'\t' read -r b code cname teacher day start end room <<< "$row"
+
   now=$(date +%s)
-  class_time=$(date -j -f "%Y-%m-%d %T" "$(date +%F) ${start}" +%s 2>/dev/null || date -d "$(date +%F) ${start}" +%s 2>/dev/null || echo 0)
-  if [[ "$class_time" == "0" ]]; then exit 0; fi
+  class_time=$(date -j -f "%Y-%m-%d %T" "$(date +%F) ${start}" +%s 2>/dev/null \
+               || date -d "$(date +%F) ${start}" +%s 2>/dev/null \
+               || echo 0)
+
+  [[ "$class_time" == "0" ]] && exit 0
+
   diff=$(( (class_time - now) / 60 ))
+
   if (( diff <= 10 && diff >= 0 )); then
     send_notification "$batch" "Next class ${code} - ${cname} at ${start} in ${room} (${diff} minutes left)"
   fi
@@ -95,7 +116,6 @@ cron_check() {
 
 cron_me() {
   if [[ -f "${BASE_DIR}/config/my_batch.conf" ]]; then
-    # shellcheck source=/dev/null
     source "${BASE_DIR}/config/my_batch.conf"
     cron_check "${MY_BATCH}"
   else
@@ -107,7 +127,8 @@ manual_reminder() {
   local batch="$1"
   local row
   row="$(next_class "$batch")" || row=""
-  if [[ -z "$row" ]]; then echo "No upcoming class"; exit 0; fi
+  [[ -z "$row" ]] && { echo "No upcoming class"; exit 0; }
+
   IFS=$'\t' read -r b code cname teacher day start end room <<< "$row"
   send_notification "$batch" "Manual reminder: ${code} - ${cname} at ${start} in ${room}"
 }
