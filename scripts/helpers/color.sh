@@ -1,4 +1,3 @@
-# Color codes
 RED="\e[31m"
 GREEN="\e[32m"
 BLUE="\e[34m"
