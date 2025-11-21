@@ -1,158 +1,465 @@
 #!/usr/bin/env bash
-# scripts/timetable.sh - universal notifications (macOS + Linux)
-set -u
+
+set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)/.."
-HELPERS_DIR="$(cd "$(dirname "$0")" && pwd)/helpers"
-
-# load helpers (optional)
-[ -f "${HELPERS_DIR}/color.sh" ] && source "${HELPERS_DIR}/color.sh"
-[ -f "${HELPERS_DIR}/logger.sh" ] && source "${HELPERS_DIR}/logger.sh"
+EXPORT_DIR="${BASE_DIR}/exports"
+mkdir -p "$EXPORT_DIR"
 
 DB_USER="timetable_user"
 DB_PASS="Timetable@123"
 DB_NAME="timetable_db"
 
-# ❌ Removed -e (the cause of your error)
 MYSQL_CMD="mysql -u${DB_USER} -p${DB_PASS} ${DB_NAME} -N -B"
 
-# detect platform
-PLATFORM="$(uname -s)"
-case "$PLATFORM" in
-  Darwin) PLATFORM="mac" ;;
-  Linux) PLATFORM="linux" ;;
+# Terminal colors
+ESC=$'\033['
+RESET="${ESC}0m"
+BOLD="${ESC}1m"
+DIM="${ESC}2m"
+UNDER="${ESC}4m"
+FG_CYAN="${ESC}36m"
+FG_GREEN="${ESC}32m"
+FG_YELLOW="${ESC}33m"
+FG_MAG="${ESC}35m"
+FG_RED="${ESC}31m"
+FG_BLUE="${ESC}34m"
+FG_WHITE="${ESC}37m"
+BG_BLUE="${ESC}44m"
+
+UNAME="$(uname -s)"
+case "$UNAME" in
+  Darwin*) PLATFORM="mac" ;;
+  Linux*) PLATFORM="linux" ;;
+  *) PLATFORM="other" ;;
 esac
 
-run_sql() {
-  local q="$1"
-  echo "$q" | ${MYSQL_CMD}
+# Run SQL and return raw tab-separated lines (empty string on error)
+run_sql_raw() {
+  local sql="$1"
+  printf '%s\n' "$sql" | ${MYSQL_CMD} 2>/dev/null || printf ''
 }
 
-# notification helper
-notify_user() {
+# Desktop notification (mac: terminal-notifier > osascript fallback; linux: notify-send)
+notify_desktop() {
   local title="$1"
-  local message="$2"
-
-  if [[ "$PLATFORM" == "mac" ]]; then
+  local msg="$2"
+  if [ "$PLATFORM" = "mac" ]; then
     if command -v terminal-notifier >/dev/null 2>&1; then
-      terminal-notifier -title "$title" -message "$message" || true
+      terminal-notifier -title "${title}" -message "${msg}" >/dev/null 2>&1 || true
     else
-      osascript -e "display notification \"${message}\" with title \"${title}\""
+      # osascript fallback
+      osascript -e "display notification \"${msg}\" with title \"${title}\"" >/dev/null 2>&1 || true
     fi
   else
     if command -v notify-send >/dev/null 2>&1; then
-      notify-send "$title" "$message" || true
+      notify-send "${title}" "${msg}" >/dev/null 2>&1 || true
     else
-      echo "[WARN] notify-send not found. Message: $title - $message"
+      echo "[NOTIFY] ${title} - ${msg}"
     fi
   fi
 }
 
-send_notification() {
+log_notification() {
   local batch="$1"
   local message="$2"
-
-  notify_user "Timetable Reminder — ${batch}" "${message}"
-
-  local esc=$(echo "$message" | sed "s/'/''/g")
-
-  run_sql "
-    INSERT INTO NotificationLog(batch_id, message)
-    VALUES ((SELECT batch_id FROM Batch WHERE batch_name='${batch}'), '${esc}');
-  " >/dev/null 2>&1 || true
-
-  echo "$(date '+%F %T') | ${batch} | ${message}" >> "${BASE_DIR}/exports/log/reminder.log"
+  local esc="${message//\'/''}"
+  run_sql_raw "INSERT INTO NotificationLog(batch_id,message) VALUES ((SELECT batch_id FROM Batch WHERE batch_name='${batch}'), '${esc}');" >/dev/null || true
+  echo "$(date '+%F %T') | ${batch} | ${message}" >> "${EXPORT_DIR}/log/reminder.log"
 }
 
-view_timetable() {
+send_and_log() {
   local batch="$1"
-  run_sql "SELECT * FROM final_timetable_view WHERE batch_name='${batch}';"
+  local message="$2"
+  notify_desktop "Timetable — ${batch}" "${message}"
+  log_notification "$batch" "$message"
 }
 
-today_schedule() {
-  local batch="$1"
-  run_sql "CALL get_today_schedule('${batch}');"
+# List batches
+list_batches() {
+  run_sql_raw "SELECT batch_name FROM Batch ORDER BY batch_name;"
 }
 
-next_class() {
-  local batch="$1"
-  run_sql "CALL get_next_class('${batch}');"
-}
-
-export_today_csv() {
-  local batch="$1"; local out="$2"
-  mkdir -p "${BASE_DIR}/exports"
-  echo "day,start_time,end_time,course_code,course_name,teacher,room" > "$out"
-
-  ${MYSQL_CMD} <<EOF | awk -F'\t' '{printf "%s,%s,%s,%s,%s,%s,%s\n",$1,$2,$3,$4,$5,$6,$7}' >> "$out"
-CALL get_today_schedule('${batch}');
-EOF
-
-  echo "[INFO] Exported to $out"
-}
-
-cron_check() {
-  local batch="$1"
-  local row
-  row="$(next_class "$batch")" || row=""
-
-  [[ -z "$row" ]] && exit 0
-
-  IFS=$'\t' read -r b code cname teacher day start end room <<< "$row"
-
-  now=$(date +%s)
-  class_time=$(date -j -f "%Y-%m-%d %T" "$(date +%F) ${start}" +%s 2>/dev/null \
-               || date -d "$(date +%F) ${start}" +%s 2>/dev/null \
-               || echo 0)
-
-  [[ "$class_time" == "0" ]] && exit 0
-
-  diff=$(( (class_time - now) / 60 ))
-
-  if (( diff <= 10 && diff >= 0 )); then
-    send_notification "$batch" "Next class ${code} - ${cname} at ${start} in ${room} (${diff} minutes left)"
-  fi
-}
-
-cron_me() {
-  if [[ -f "${BASE_DIR}/config/my_batch.conf" ]]; then
+# default batch saved to config
+get_default_batch() {
+  if [ -f "${BASE_DIR}/config/my_batch.conf" ]; then
+    # shellcheck disable=SC1090
     source "${BASE_DIR}/config/my_batch.conf"
-    cron_check "${MY_BATCH}"
+    printf '%s' "${MY_BATCH:-}"
   else
-    echo "[WARN] my_batch.conf not found"
+    printf ''
+  fi
+}
+set_default_batch() {
+  mkdir -p "${BASE_DIR}/config"
+  printf 'MY_BATCH=%s\n' "$1" > "${BASE_DIR}/config/my_batch.conf"
+  echo -e "${FG_GREEN}${BOLD}Saved default batch:${RESET} ${BOLD}$1${RESET}"
+}
+
+# portable date helpers
+date_add_days() {
+  if [ "${PLATFORM}" = "mac" ]; then
+    date -v+"${1}"d '+%Y-%m-%d'
+  else
+    date -d "+${1} day" '+%Y-%m-%d'
+  fi
+}
+dayname_of_date() {
+  local d="$1"
+  if [ "${PLATFORM}" = "mac" ]; then
+    date -j -f "%Y-%m-%d" "$d" '+%A'
+  else
+    date -d "$d" '+%A'
   fi
 }
 
-manual_reminder() {
+# epoch for YYYY-MM-DD HH:MM:SS (portable)
+epoch_from_datetime() {
+  local when_date="$1"   # YYYY-MM-DD
+  local when_time="$2"   # HH:MM:SS (or HH:MM)
+  if [ "${PLATFORM}" = "mac" ]; then
+    date -j -f "%Y-%m-%d %T" "${when_date} ${when_time}" '+%s' 2>/dev/null || date -j -f "%Y-%m-%d %H:%M" "${when_date} ${when_time}" '+%s' 2>/dev/null || echo 0
+  else
+    date -d "${when_date} ${when_time}" '+%s' 2>/dev/null || echo 0
+  fi
+}
+
+# SQL queries (no stored procedures required)
+sql_today() {
   local batch="$1"
+  printf "SELECT d.day_name,d.start_time,d.end_time,c.course_code,c.course_name,IFNULL(GROUP_CONCAT(tch.teacher_name SEPARATOR ', '),'') AS teachers,t.room
+FROM Timetable t
+JOIN Batch b ON t.batch_id=b.batch_id
+JOIN Course c ON t.course_code=c.course_code
+JOIN DaySlot d ON t.slot_id=d.slot_id
+LEFT JOIN Timetable_Teachers tt ON t.tt_id=tt.tt_id
+LEFT JOIN Teachers tch ON tt.teacher_code=tch.teacher_code
+WHERE b.batch_name='%s' AND d.day_name = DAYNAME(CURDATE())
+GROUP BY t.tt_id
+ORDER BY d.start_time;" "$batch"
+}
+
+sql_tomorrow() {
+  local batch="$1"
+  local tdate; tdate="$(date_add_days 1)"
+  local dayname; dayname="$(dayname_of_date "$tdate")"
+  printf "SELECT d.day_name,d.start_time,d.end_time,c.course_code,c.course_name,IFNULL(GROUP_CONCAT(tch.teacher_name SEPARATOR ', '),'') AS teachers,t.room
+FROM Timetable t
+JOIN Batch b ON t.batch_id=b.batch_id
+JOIN Course c ON t.course_code=c.course_code
+JOIN DaySlot d ON t.slot_id=d.slot_id
+LEFT JOIN Timetable_Teachers tt ON t.tt_id=tt.tt_id
+LEFT JOIN Teachers tch ON tt.teacher_code=tch.teacher_code
+WHERE b.batch_name='%s' AND d.day_name = '%s'
+GROUP BY t.tt_id
+ORDER BY d.start_time;" "$batch" "$dayname"
+}
+
+sql_week() {
+  local batch="$1"
+  printf "SELECT d.day_name,d.start_time,d.end_time,c.course_code,c.course_name,IFNULL(GROUP_CONCAT(tch.teacher_name SEPARATOR ', '),'') AS teachers,t.room
+FROM Timetable t
+JOIN Batch b ON t.batch_id=b.batch_id
+JOIN Course c ON t.course_code=c.course_code
+JOIN DaySlot d ON t.slot_id=d.slot_id
+LEFT JOIN Timetable_Teachers tt ON t.tt_id=tt.tt_id
+LEFT JOIN Teachers tch ON tt.teacher_code=tch.teacher_code
+WHERE b.batch_name='%s'
+GROUP BY t.tt_id
+ORDER BY FIELD(d.day_name,'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'), d.start_time;" "$batch"
+}
+
+sql_next() {
+  local batch="$1"
+  printf "SELECT b.batch_name, c.course_code, c.course_name, IFNULL(GROUP_CONCAT(tch.teacher_name SEPARATOR ', '),'') AS teachers, d.day_name, d.start_time, d.end_time, t.room
+FROM Timetable t
+JOIN Batch b ON t.batch_id=b.batch_id
+JOIN Course c ON t.course_code=c.course_code
+JOIN DaySlot d ON t.slot_id=d.slot_id
+LEFT JOIN Timetable_Teachers tt ON t.tt_id=tt.tt_id
+LEFT JOIN Teachers tch ON tt.teacher_code=tch.teacher_code
+WHERE b.batch_name='%s' AND d.day_name = DAYNAME(CURDATE()) AND d.start_time > CURTIME()
+GROUP BY t.tt_id
+ORDER BY d.start_time
+LIMIT 1;" "$batch"
+}
+
+sql_now() {
+  local batch="$1"
+  printf "SELECT d.day_name,d.start_time,d.end_time,c.course_code,c.course_name,IFNULL(GROUP_CONCAT(tch.teacher_name SEPARATOR ', '),'') AS teachers,t.room
+FROM Timetable t
+JOIN Batch b ON t.batch_id=b.batch_id
+JOIN Course c ON t.course_code=c.course_code
+JOIN DaySlot d ON t.slot_id=d.slot_id
+LEFT JOIN Timetable_Teachers tt ON t.tt_id=tt.tt_id
+LEFT JOIN Teachers tch ON tt.teacher_code=tch.teacher_code
+WHERE b.batch_name='%s' AND d.day_name = DAYNAME(CURDATE()) AND d.start_time <= CURTIME() AND d.end_time > CURTIME()
+GROUP BY t.tt_id
+ORDER BY d.start_time;" "$batch"
+}
+
+# ---------- Auto-fit table printer (Theme C) ----------
+print_table_auto() {
+  local header_line="$1"
+  local -a rows
+  local ln
+  while IFS= read -r ln; do rows+=("$ln"); done
+
+  IFS='|' read -ra headers <<< "$header_line"
+  local ncol=${#headers[@]}
+  local -a widths
+  for ((i=0;i<ncol;i++)); do widths[i]=${#headers[i]}; done
+
+  for r in "${rows[@]}"; do
+    IFS=$'\t' read -ra fields <<< "$r"
+    for ((i=0;i<ncol;i++)); do
+      local val="${fields[i]:-}"
+      val="$(printf '%s' "$val" | tr -s '[:space:]' ' ')"
+      local l=${#val}
+      if (( l > widths[i] )); then widths[i]=$l; fi
+    done
+  done
+
+  # compute total width and shrink if needed (basic)
+  local termw=9999
+  if command -v tput >/dev/null 2>&1; then termw="$(tput cols 2>/dev/null || echo 9999)"; fi
+  local totalw=1
+  for w in "${widths[@]}"; do totalw=$(( totalw + w + 3 )); done
+  if (( totalw > termw )); then
+    # shrink teachers or course columns first (best-effort)
+    for key in "teachers" "course_name" "code" "room"; do
+      for ((i=0;i<ncol;i++)); do
+        if [[ "${headers[i],,}" == *"${key}"* ]]; then
+          widths[i]=$(( widths[i] - 10 ))
+          if (( widths[i] < 8 )); then widths[i]=8; fi
+          totalw=1
+          for w in "${widths[@]}"; do totalw=$(( totalw + w + 3 )); done
+          if (( totalw <= termw )); then break 2; fi
+        fi
+      done
+    done
+  fi
+
+  # border pieces
+  local TL="╔" TR="╗" BL="╚" BR="╝" HOR="═" VER="║" TJ="╦" MJ="╬" BJ="╩"
+  # top
+  local top="${TL}"
+  for ((i=0;i<ncol;i++)); do top+=$(printf '%*s' $((widths[i]+2)) '' | tr ' ' "${HOR}"); top+=$(( i<ncol-1 ? "╦" : "" )); done
+  top="${top}${TR}"
+  echo -e "${FG_BLUE}${BOLD}${top}${RESET}"
+
+  # header row
+  printf "%b " "${VER}"
+  for ((i=0;i<ncol;i++)); do
+    local h="${headers[i]}"
+    printf "%b%s%b" "${BOLD}${FG_CYAN}" "$h" "${RESET}"
+    printf '%*s' $((widths[i]-${#h}+1)) ''
+    printf "%b " "${VER}"
+  done
+  echo
+
+  # mid separator
+  local mid="╠"
+  for ((i=0;i<ncol;i++)); do mid+=$(printf '%*s' $((widths[i]+2)) '' | tr ' ' '─'); mid+=$(( i<ncol-1 ? "╬" : "" )); done
+  mid="${mid}╣"
+  echo -e "${FG_BLUE}${mid}${RESET}"
+
+  # rows
+  for r in "${rows[@]}"; do
+    IFS=$'\t' read -ra flds <<< "$r"
+    printf "%b " "${VER}"
+    for ((i=0;i<ncol;i++)); do
+      local val="${flds[i]:-}"
+      val="$(printf '%s' "$val" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+      if (( ${#val} > widths[i] )); then val="${val:0:$((widths[i]-1))}…"; fi
+      printf "%-*s " "${widths[i]}" "$val"
+      printf "%b" "${VER}"
+    done
+    echo
+  done
+
+  # bottom
+  local bot="╚"
+  for ((i=0;i<ncol;i++)); do bot+=$(printf '%*s' $((widths[i]+2)) '' | tr ' ' "${HOR}"); bot+=$(( i<ncol-1 ? "╩" : "" )); done
+  bot="${bot}╝"
+  echo -e "${FG_BLUE}${BOLD}${bot}${RESET}"
+}
+
+query_and_print() {
+  local sql="$1"
+  local header="$2"
+  local raw
+  raw="$(run_sql_raw "$sql")"
+  if [ -z "$raw" ]; then
+    echo -e "${FG_YELLOW}No rows found.${RESET}"
+    return
+  fi
+  printf '%s\n' "$raw" | print_table_auto "$header"
+}
+
+# ---------- Export CSV ----------
+export_today_csv() {
+  local batch="$1"
+  if [ -z "$batch" ]; then batch="$(get_default_batch)"; fi
+  if [ -z "$batch" ]; then echo -e "${FG_RED}No batch selected.${RESET}"; return; fi
+  local file="${EXPORT_DIR}/today_${batch}_$(date '+%Y%m%d').csv"
+  echo "day,start_time,end_time,course_code,course_name,teachers,room" > "$file"
+  run_sql_raw "$(sql_today "$batch")" | awk -F'\t' '{gsub(/"/,"\"\""); printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",$1,$2,$3,$4,$5,$6,$7}' >> "$file"
+  echo -e "${FG_GREEN}Exported → $file${RESET}"
+}
+
+# ---------- Next class helpers ----------
+get_next_class_row() {
+  local batch="$1"
+  run_sql_raw "$(sql_next "$batch")"
+}
+
+# live countdown: checks next class start and shows countdown; notifies at 10 minutes and at start.
+live_countdown_for_next() {
+  local batch="$1"
+  if [ -z "$batch" ]; then batch="$(get_default_batch)"; fi
+  if [ -z "$batch" ]; then echo -e "${FG_RED}No batch selected.${RESET}"; return; fi
+
+  # fetch next class
   local row
-  row="$(next_class "$batch")" || row=""
-  [[ -z "$row" ]] && { echo "No upcoming class"; exit 0; }
+  row="$(get_next_class_row "$batch")"
+  if [ -z "$row" ]; then echo -e "${FG_YELLOW}No upcoming class today.${RESET}"; return; fi
 
-  IFS=$'\t' read -r b code cname teacher day start end room <<< "$row"
-  send_notification "$batch" "Manual reminder: ${code} - ${cname} at ${start} in ${room}"
+  # row fields: batch, course_code, course_name, teachers, day_name, start_time, end_time, room
+  IFS=$'\t' read -r nb code cname teachers day start end room <<< "$row"
+
+  # compute epoch for today's date + start time
+  local today_date
+  today_date="$(date '+%Y-%m-%d')"
+  local start_epoch
+  start_epoch="$(epoch_from_datetime "$today_date" "$start")"
+  if [ "$start_epoch" = "0" ]; then echo -e "${FG_RED}Could not parse class time.${RESET}"; return; fi
+
+  # signal flags
+  local ten_notified=0
+  echo -e "${FG_GREEN}Countdown started for:${RESET} ${BOLD}${code} - ${cname}${RESET} at ${start} (${room})"
+  # loop until start_epoch
+  while true; do
+    local now_epoch
+    now_epoch="$(date +%s)"
+    local diff=$(( start_epoch - now_epoch ))
+    if (( diff <= 0 )); then
+      send_and_log "$batch" "Class starting now: ${code} - ${cname} in ${room}"
+      echo -e "${FG_GREEN}Class has started.${RESET}"
+      break
+    fi
+    # notify at 10 minutes (600 seconds)
+    if (( diff <= 600 && ten_notified == 0 )); then
+      send_and_log "$batch" "Upcoming class in 10 minutes: ${code} - ${cname} at ${start} in ${room}"
+      ten_notified=1
+    fi
+    # format diff into mm:ss or hh:mm:ss
+    local hours=$(( diff / 3600 ))
+    local mins=$(( (diff % 3600) / 60 ))
+    local secs=$(( diff % 60 ))
+    printf "\r%sCountdown: %02d:%02d:%02d until %s %s (%s)    " "${FG_CYAN}" "$hours" "$mins" "$secs" "${code}" "${cname}" "${RESET}"
+    sleep 1
+  done
+  echo
 }
 
-help_menu() {
-  cat <<EOF
-Smart Timetable - Usage:
-  ./timetable.sh view <BATCH>
-  ./timetable.sh today <BATCH>
-  ./timetable.sh next <BATCH>
-  ./timetable.sh export <BATCH> <file.csv>
-  ./timetable.sh cron_check <BATCH>
-  ./timetable.sh cron_me
-  ./timetable.sh manual_reminder <BATCH>
-EOF
+# Manual reminder: send notification for next class immediately
+manual_reminder_now() {
+  local batch="$1"
+  if [ -z "$batch" ]; then batch="$(get_default_batch)"; fi
+  if [ -z "$batch" ]; then echo -e "${FG_RED}No batch selected.${RESET}"; return; fi
+  local row
+  row="$(get_next_class_row "$batch")"
+  if [ -z "$row" ]; then echo -e "${FG_YELLOW}No upcoming class today.${RESET}"; return; fi
+  IFS=$'\t' read -r nb code cname teachers day start end room <<< "$row"
+  local msg="Manual reminder: ${code} - ${cname} at ${start} in ${room}"
+  send_and_log "$batch" "$msg"
+  echo -e "${FG_GREEN}Reminder sent.${RESET}"
 }
 
-case "${1:-}" in
-  view) view_timetable "${2:-}" ;;
-  today) today_schedule "${2:-}" ;;
-  next) next_class "${2:-}" ;;
-  export) export_today_csv "${2:-}" "${3:-}" ;;
-  cron_check) cron_check "${2:-}" ;;
-  cron_me) cron_me ;;
-  manual_reminder) manual_reminder "${2:-}" ;;
-  *) help_menu ;;
-esac
+# Choose batch menu
+choose_batch_menu() {
+  local def; def="$(get_default_batch)"
+  echo -e "${BOLD}Available batches:${RESET}"
+  local -a items; local idx=0
+  while IFS= read -r b; do
+    items+=("$b")
+    idx=$((idx+1))
+    if [ "$b" = "$def" ]; then
+      echo -e " $idx) ${b} ${FG_YELLOW}(default)${RESET}"
+    else
+      echo -e " $idx) ${b}"
+    fi
+  done < <(list_batches)
+  echo " 0) Cancel"
+  read -rp "Choose number: " sel
+  if [ -z "$sel" ] || [ "$sel" = "0" ]; then return 1; fi
+  if ! [[ "$sel" =~ ^[0-9]+$ ]]; then echo "Invalid"; return 1; fi
+  local choice="${items[$((sel-1))]:-}"
+  if [ -z "$choice" ]; then echo "Invalid choice"; return 1; fi
+  set_default_batch "$choice"
+  return 0
+}
+
+# ---------------- Main interactive loop ----------------
+while true; do
+  clear
+  current_batch="$(get_default_batch)"
+  echo -e "${BOLD}${FG_MAG}                                    ${current_batch} Timetable${RESET}"
+  echo -e "${FG_CYAN} Batch:${RESET} ${BOLD}${FG_GREEN}${current_batch:-<none>}${RESET}"
+  echo
+  echo -e "${FG_BLUE} 1)${RESET} ${FG_CYAN}Today${RESET}      ${FG_BLUE}2)${RESET} ${FG_CYAN}Tomorrow${RESET}   ${FG_BLUE}3)${RESET} ${FG_CYAN}Week${RESET}"
+  echo -e "${FG_BLUE} 4)${RESET} ${FG_CYAN}Next class${RESET} ${FG_BLUE}5)${RESET} ${FG_CYAN}Now${RESET}       ${FG_BLUE}6)${RESET} ${FG_CYAN}Countdown (next)${RESET}"
+  echo -e "${FG_BLUE} 7)${RESET} ${FG_CYAN}Manual reminder${RESET}  ${FG_BLUE}8)${RESET} ${FG_CYAN}Export Today (CSV)${RESET}"
+  echo -e "${FG_BLUE} 9)${RESET} ${FG_CYAN}Change batch${RESET}  ${FG_BLUE}0)${RESET} ${FG_RED}Exit${RESET}"
+  echo
+  read -rp $'Choose option [0-9]: ' opt
+  case "$opt" in
+    1)
+      if [ -z "$current_batch" ]; then echo -e "${FG_RED}No batch selected. Use option 9 to set.${RESET}"; read -rp "Press Enter..." _; continue; fi
+      echo
+      query_and_print "$(sql_today "$current_batch")" "day|start|end|code|course_name|teachers|room"
+      ;;
+    2)
+      if [ -z "$current_batch" ]; then echo -e "${FG_RED}No batch selected. Use option 9 to set.${RESET}"; read -rp "Press Enter..." _; continue; fi
+      echo
+      query_and_print "$(sql_tomorrow "$current_batch")" "day|start|end|code|course_name|teachers|room"
+      ;;
+    3)
+      if [ -z "$current_batch" ]; then echo -e "${FG_RED}No batch selected. Use option 9 to set.${RESET}"; read -rp "Press Enter..." _; continue; fi
+      echo
+      query_and_print "$(sql_week "$current_batch")" "day|start|end|code|course_name|teachers|room"
+      ;;
+    4)
+      if [ -z "$current_batch" ]; then echo -e "${FG_RED}No batch selected. Use option 9 to set.${RESET}"; read -rp "Press Enter..." _; continue; fi
+      echo
+      query_and_print "$(sql_next "$current_batch")" "batch|code|course_name|teachers|day|start|end|room"
+      ;;
+    5)
+      if [ -z "$current_batch" ]; then echo -e "${FG_RED}No batch selected. Use option 9 to set.${RESET}"; read -rp "Press Enter..." _; continue; fi
+      echo
+      query_and_print "$(sql_now "$current_batch")" "day|start|end|code|course_name|teachers|room"
+      ;;
+    6)
+      live_countdown_for_next "$current_batch"
+      ;;
+    7)
+      manual_reminder_now "$current_batch"
+      ;;
+    8)
+      export_today_csv "$current_batch"
+      ;;
+    9)
+      choose_batch_menu
+      ;;
+    0)
+      echo -e "${FG_GREEN}Bye!${RESET}"
+      exit 0
+      ;;
+    *)
+      echo -e "${FG_YELLOW}Invalid option${RESET}"
+      ;;
+  esac
+  echo
+  read -rp "Press Enter to continue..." _
+done

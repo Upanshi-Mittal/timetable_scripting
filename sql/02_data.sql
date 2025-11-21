@@ -20,7 +20,7 @@ INSERT INTO Teachers VALUES
 ('KRL', 'Dr. K. Rajalakshmi'),
 ('HG', 'Dr. Himanshu Agarwal'),
 ('PK', 'Ms. Purti Kohli'),
-('PSO', 'PSO'),
+('PSO', 'Mr. Prateek Soni'),
 ('NS', 'Neetu Singh'),
 ('AN', 'Dr. Anuj Bhardwaj'),
 ('PTK', 'Pratik Shrivastava'),

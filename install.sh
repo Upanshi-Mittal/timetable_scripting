@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
 # install.sh - Universal installer (macOS + Linux)
-set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$PROJECT_DIR/exports/log"
 mkdir -p "$LOG_DIR"
 
-echo "🔧 Starting Smart Timetable Universal Installer..."
-echo "📁 Project directory: $PROJECT_DIR"
+echo "Starting Smart Timetable Universal Installer..."
+echo "Project directory: $PROJECT_DIR"
 
-# defaults
 DB_USER="timetable_user"
 DB_PASS="Timetable@123"
 DB_NAME="timetable_db"
 
-# detect OS
 OS="$(uname -s)"
 case "$OS" in
   Darwin) PLATFORM="mac" ;;
@@ -23,11 +20,10 @@ esac
 
 echo "[INFO] Detected platform: $PLATFORM"
 
-# helper to run apt/brew installs
 install_packages() {
   if [[ "$PLATFORM" == "mac" ]]; then
     if ! command -v brew >/dev/null 2>&1; then
-      echo "❌ Homebrew not installed. Install it from https://brew.sh/ and re-run installer."
+      echo " Homebrew not installed. Install it from https://brew.sh/ and re-run installer."
       exit 1
     fi
     echo "[INFO] Installing mysql + terminal-notifier via brew..."
@@ -43,7 +39,6 @@ install_packages() {
   fi
 }
 
-# start mysql service
 start_mysql() {
   if [[ "$PLATFORM" == "mac" ]]; then
     echo "[INFO] Starting MySQL service (brew)..."
@@ -54,33 +49,25 @@ start_mysql() {
   fi
 }
 
-# create DB user (attempt multiple auth modes)
 create_db_user() {
   echo "[INFO] Creating DB user '${DB_USER}' with provided password."
-  # Try to create using root password prompt
   echo "If MySQL root user requires a password, enter it now. If not, press Enter."
   read -s -p "MySQL root password (leave blank if none): " ROOTPASS
   echo
-  # Try root with password first
   if [[ -n "$ROOTPASS" ]]; then
     mysql -u root -p"$ROOTPASS" -e "DROP USER IF EXISTS '${DB_USER}'@'localhost'; CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}'; GRANT ALL PRIVILEGES ON *.* TO '${DB_USER}'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;" >/dev/null 2>>"$LOG_DIR/mysql_queries.log" && return 0 || echo "[WARN] root+password attempt failed"
   fi
-  # Try socket/no-password root login (common on some installs)
   if mysql -u root -e "SELECT 1" >/dev/null 2>>"$LOG_DIR/mysql_queries.log"; then
     mysql -u root -e "DROP USER IF EXISTS '${DB_USER}'@'localhost'; CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}'; GRANT ALL PRIVILEGES ON *.* TO '${DB_USER}'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;" >/dev/null 2>>"$LOG_DIR/mysql_queries.log" && return 0
   fi
-  # If we get here, ask user to create manually
   echo "❌ Could not create DB user automatically. Please create user manually with root privileges:"
   echo "    CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
   echo "    GRANT ALL PRIVILEGES ON *.* TO '${DB_USER}'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;"
   exit 1
 }
 
-# import SQL files using mysql client and DB user
 import_sql_files() {
   echo "[INFO] Importing SQL (this may take a few seconds)..."
-  # create database and import using root or the new user
-  # First try using the timetable_user directly (if created)
   if mysql -u "${DB_USER}" -p"${DB_PASS}" -e "CREATE DATABASE IF NOT EXISTS ${DB_NAME};" >/dev/null 2>>"$LOG_DIR/mysql_queries.log"; then
     for f in "$PROJECT_DIR"/sql/*.sql; do
       echo "[INFO] Importing $f"
@@ -90,7 +77,6 @@ import_sql_files() {
       }
     done
   else
-    # fallback: try root
     echo "[INFO] Fallback: attempting import with root (you may be prompted)"
     mysql -u root -e "CREATE DATABASE IF NOT EXISTS ${DB_NAME};" 2>>"$LOG_DIR/mysql_queries.log" || true
     for f in "$PROJECT_DIR"/sql/*.sql; do
@@ -103,7 +89,6 @@ import_sql_files() {
   fi
 }
 
-# install cron job (absolute path)
 install_cron() {
   SCRIPT="$PROJECT_DIR/scripts/cron_check.sh"
   CRON_CMD="*/5 * * * * $SCRIPT"
@@ -118,14 +103,12 @@ install_cron() {
   crontab -l
 }
 
-# set user batch config
 set_batch_config() {
   read -p "📌 Enter your batch name (example: CS_1): " BATCH
   echo "MY_BATCH=$BATCH" > "$PROJECT_DIR/config/my_batch.conf"
   echo "[INFO] Saved your batch preference."
 }
 
-# notification test (platform-specific)
 send_setup_notification() {
   local msg="Smart Timetable is now running."
   if [[ "$PLATFORM" == "mac" ]]; then
@@ -143,7 +126,6 @@ send_setup_notification() {
   fi
 }
 
-# main flow
 install_packages
 start_mysql
 create_db_user
@@ -154,4 +136,4 @@ send_setup_notification
 
 touch "$PROJECT_DIR/config/installed.flag"
 echo "🎉 Smart Timetable installed successfully!"
-echo "➡ Run: ./scripts/timetable.sh today \$MY_BATCH"
+echo "➡ Run: ./scripts/timetable.sh"

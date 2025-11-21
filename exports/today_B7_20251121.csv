@@ -1,0 +1,4 @@
+day,start_time,end_time,course_code,course_name,teachers,room
+"Friday","11:00:00","12:00:00","MA213","Mathematical Foundations for Artificial Intelligence and Data Science","Dr. Priya Shahi","FF8"
+"Friday","12:00:00","13:00:00","CS213","Database Management Systems","Dr. Indu Chawla","FF7"
+"Friday","15:00:00","17:00:00","B15CS214","Unix Programming Lab","Ms. Amarjeet Kaur, Ms. Purti Kohli, Mr. Prateek Soni","CL17/CL18"
