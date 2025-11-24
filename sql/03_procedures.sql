@@ -2,14 +2,13 @@ USE timetable_db;
 
 DELIMITER $$
 
--- NEXT CLASS PROCEDURE
 CREATE PROCEDURE get_next_class(IN bname VARCHAR(64))
 BEGIN
     SELECT 
         b.batch_name,
         c.course_code,
         c.course_name,
-        GROUP_CONCAT(tch.teacher_name SEPARATOR ', ') AS teachers,
+        group_concat(tch.teacher_name SEPARATOR ', ') AS teachers,
         d.day_name,
         d.start_time,
         d.end_time,
@@ -37,7 +36,7 @@ BEGIN
         d.end_time,
         c.course_code,
         c.course_name,
-        GROUP_CONCAT(tch.teacher_name SEPARATOR ', ') AS teachers,
+        group_concat(tch.teacher_name SEPARATOR ', ') AS teachers,
         t.room
     FROM Timetable t
     JOIN Batch b ON t.batch_id = b.batch_id
@@ -58,7 +57,7 @@ CREATE PROCEDURE add_extra_class_today(
     IN teacherName VARCHAR(64),
     IN roomName VARCHAR(16)
 )
-main_block: BEGIN
+BEGIN
     DECLARE bid INT;
     DECLARE teacherCode VARCHAR(32);
     DECLARE todayName VARCHAR(16);
@@ -66,12 +65,10 @@ main_block: BEGIN
 
     SET todayName = DAYNAME(CURDATE());
 
-    -- get batch id
     SELECT batch_id INTO bid
     FROM Batch
     WHERE batch_name = bname;
 
-    -- get teacher code
     SELECT teacher_code INTO teacherCode
     FROM Teachers
     WHERE teacher_name = teacherName
@@ -82,7 +79,6 @@ main_block: BEGIN
         LEAVE main_block;
     END IF;
 
-    -- find common free slot
     SELECT d.slot_id INTO selectedSlot
     FROM DaySlot d
     WHERE d.day_name = todayName
@@ -106,15 +102,11 @@ main_block: BEGIN
         LEAVE main_block;
     END IF;
 
-    -- insert extra class
     INSERT INTO Timetable(batch_id, slot_id, course_code, room, is_extra)
     VALUES (bid, selectedSlot, courseCode, roomName, 1);
 
     SELECT CONCAT('EXTRA_CLASS_ADDED:', selectedSlot) AS status;
 
-END main_block$$
-
-
-
+END $$
 
 DELIMITER ;

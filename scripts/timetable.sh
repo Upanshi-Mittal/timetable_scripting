@@ -118,7 +118,7 @@ epoch_from_datetime() {
 
 sql_today() {
   local batch="$1"
-  printf "SELECT d.day_name,d.start_time,d.end_time,c.course_code,c.course_name,IFNULL(GROUP_CONCAT(tch.teacher_name SEPARATOR ', '),'') AS teachers,t.room
+  printf "SELECT d.day_name,d.start_time,d.end_time,c.course_code,c.course_name AS teachers,t.room
 FROM Timetable t
 JOIN Batch b ON t.batch_id=b.batch_id
 JOIN Course c ON t.course_code=c.course_code
@@ -319,20 +319,16 @@ add_extra_class_today_menu() {
 
   echo -e "${BOLD}${FG_CYAN}Add Extra Class for Batch $batch (Today)${RESET}"
 
-  # ASK FOR ALL REQUIRED DETAILS
   read -rp "Enter course code: " course
   read -rp "Enter teacher name: " teacher_name
   read -rp "Enter room name: " room
 
-  # CALL SQL PROCEDURE
   local raw
   raw=$(run_sql_raw "CALL add_extra_class_today('$batch', '$course', '$teacher_name', '$room');")
   echo "RAW OUTPUT = '$raw'"
 
-  # CLEAN SQL OUTPUT
   raw=$(echo "$raw" | tr -d '\r' | tr -d '\n' | xargs)
   
-  # ERROR HANDLING
   if [[ "$raw" == "TEACHER_NOT_FOUND" ]]; then
       echo -e "${FG_RED}Teacher '$teacher_name' not found.${RESET}"
       return
@@ -343,22 +339,17 @@ add_extra_class_today_menu() {
       return
   fi
 
-  # SUCCESS — EXTRACT SLOT NUMBER
   slot="${raw#EXTRA_CLASS_ADDED:}"
   slot="${slot:-0}"
 
-  # FETCH SLOT TIMINGS SAFELY
   slot_start="$(run_sql_raw "SELECT start_time FROM DaySlot WHERE slot_id=$slot LIMIT 1;" || echo "")"
   slot_end="$(run_sql_raw "SELECT end_time FROM DaySlot WHERE slot_id=$slot LIMIT 1;" || echo "")"
 
-  # FALLBACK IF EMPTY
   slot_start="${slot_start:-UNKNOWN}"
   slot_end="${slot_end:-UNKNOWN}"
 
-  # DISPLAY SUCCESS MESSAGE
   echo -e "${FG_GREEN}Extra class added in Slot $slot ($slot_start-$slot_end).${RESET}"
 
-  # LOG + NOTIFICATION
   send_and_log "$batch" \
 "Extra class added: $course by $teacher_name | Slot $slot ($slot_start-$slot_end) | Room $room"
 }
@@ -371,21 +362,17 @@ get_next_class_row() {
   run_sql_raw "$(sql_next "$batch")"
 }
 
-# live countdown: checks next class start and shows countdown; notifies at 10 minutes and at start.
 live_countdown_for_next() {
   local batch="$1"
   if [ -z "$batch" ]; then batch="$(get_default_batch)"; fi
   if [ -z "$batch" ]; then echo -e "${FG_RED}No batch selected.${RESET}"; return; fi
 
-  # fetch next class
   local row
   row="$(get_next_class_row "$batch")"
   if [ -z "$row" ]; then echo -e "${FG_YELLOW}No upcoming class today.${RESET}"; return; fi
 
-  # row fields: batch, course_code, course_name, teachers, day_name, start_time, end_time, room
   IFS=$'\t' read -r nb code cname teachers day start end room <<< "$row"
 
-  # compute epoch for today's date + start time
   local today_date
   today_date="$(date '+%Y-%m-%d')"
   local start_epoch
@@ -464,7 +451,7 @@ while true; do
   echo -e "${FG_BLUE} 1)${RESET} ${FG_CYAN}Today${RESET}      ${FG_BLUE}2)${RESET} ${FG_CYAN}Tomorrow${RESET}   ${FG_BLUE}3)${RESET} ${FG_CYAN}Week${RESET}"
   echo -e "${FG_BLUE} 4)${RESET} ${FG_CYAN}Next class${RESET} ${FG_BLUE}5)${RESET} ${FG_CYAN}Now${RESET}       ${FG_BLUE}6)${RESET} ${FG_CYAN}Countdown (next)${RESET}"
   echo -e "${FG_BLUE} 7)${RESET} ${FG_CYAN}Manual reminder${RESET}  ${FG_BLUE}8)${RESET} ${FG_CYAN}Export Today (CSV)${RESET}"
-  echo -e "${FG_BLUE} 9)${RESET} ${FG_CYAN}Change batch${RESET}  ${FG_BLUE}0)${RESET} ${FG_RED}Exit${RESET}     ${FG_BLUE}10)${RESET} ${FG_CYAN}Add Extra Class (Today)${RESET}"
+  echo -e "${FG_BLUE} 9)${RESET} ${FG_CYAN}Change batch${RESET}      ${FG_BLUE}10)${RESET} ${FG_CYAN}Add Extra Class (Today)${RESET}         ${FG_BLUE}0)${RESET} ${FG_RED}Exit${RESET}"
 
   echo
   read -rp $'Choose option [0-9]: ' opt
