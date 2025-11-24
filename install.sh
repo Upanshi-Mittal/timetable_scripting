@@ -60,7 +60,7 @@ create_db_user() {
   if mysql -u root -e "SELECT 1" >/dev/null 2>>"$LOG_DIR/mysql_queries.log"; then
     mysql -u root -e "DROP USER IF EXISTS '${DB_USER}'@'localhost'; CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}'; GRANT ALL PRIVILEGES ON *.* TO '${DB_USER}'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;" >/dev/null 2>>"$LOG_DIR/mysql_queries.log" && return 0
   fi
-  echo "❌ Could not create DB user automatically. Please create user manually with root privileges:"
+  echo " Could not create DB user automatically. Please create user manually with root privileges:"
   echo "    CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
   echo "    GRANT ALL PRIVILEGES ON *.* TO '${DB_USER}'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;"
   exit 1

@@ -29,7 +29,7 @@ BEGIN
         NEW.batch_id,
         CONCAT(
             'New class added: Course ',
-            NEW.course_id,
+            NEW.course_code,
             ' at slot ',
             NEW.slot_id,
             ' (Room: ',

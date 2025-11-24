@@ -51,4 +51,70 @@ BEGIN
     ORDER BY d.start_time;
 END $$
 
+
+CREATE PROCEDURE add_extra_class_today(
+    IN bname VARCHAR(64),
+    IN courseCode VARCHAR(32),
+    IN teacherName VARCHAR(64),
+    IN roomName VARCHAR(16)
+)
+main_block: BEGIN
+    DECLARE bid INT;
+    DECLARE teacherCode VARCHAR(32);
+    DECLARE todayName VARCHAR(16);
+    DECLARE selectedSlot INT;
+
+    SET todayName = DAYNAME(CURDATE());
+
+    -- get batch id
+    SELECT batch_id INTO bid
+    FROM Batch
+    WHERE batch_name = bname;
+
+    -- get teacher code
+    SELECT teacher_code INTO teacherCode
+    FROM Teachers
+    WHERE teacher_name = teacherName
+    LIMIT 1;
+
+    IF teacherCode IS NULL THEN
+        SELECT 'TEACHER_NOT_FOUND' AS status;
+        LEAVE main_block;
+    END IF;
+
+    -- find common free slot
+    SELECT d.slot_id INTO selectedSlot
+    FROM DaySlot d
+    WHERE d.day_name = todayName
+      AND d.slot_id NOT IN (
+        SELECT slot_id FROM Timetable WHERE batch_id = bid
+      )
+      AND d.slot_id NOT IN (
+        SELECT t.slot_id
+        FROM Timetable t
+        JOIN Timetable_Teachers tt ON t.tt_id = tt.tt_id
+        WHERE tt.teacher_code = teacherCode
+      )
+      AND d.slot_id NOT IN (
+        SELECT slot_id FROM Timetable WHERE room = roomName
+      )
+    ORDER BY d.start_time
+    LIMIT 1;
+
+    IF selectedSlot IS NULL THEN
+        SELECT 'NO_COMMON_FREE_SLOT' AS status;
+        LEAVE main_block;
+    END IF;
+
+    -- insert extra class
+    INSERT INTO Timetable(batch_id, slot_id, course_code, room, is_extra)
+    VALUES (bid, selectedSlot, courseCode, roomName, 1);
+
+    SELECT CONCAT('EXTRA_CLASS_ADDED:', selectedSlot) AS status;
+
+END main_block$$
+
+
+
+
 DELIMITER ;

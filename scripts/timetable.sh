@@ -12,7 +12,6 @@ DB_NAME="timetable_db"
 
 MYSQL_CMD="mysql -u${DB_USER} -p${DB_PASS} ${DB_NAME} -N -B"
 
-# Terminal colors
 ESC=$'\033['
 RESET="${ESC}0m"
 BOLD="${ESC}1m"
@@ -34,13 +33,11 @@ case "$UNAME" in
   *) PLATFORM="other" ;;
 esac
 
-# Run SQL and return raw tab-separated lines (empty string on error)
 run_sql_raw() {
   local sql="$1"
   printf '%s\n' "$sql" | ${MYSQL_CMD} 2>/dev/null || printf ''
 }
 
-# Desktop notification (mac: terminal-notifier > osascript fallback; linux: notify-send)
 notify_desktop() {
   local title="$1"
   local msg="$2"
@@ -48,7 +45,6 @@ notify_desktop() {
     if command -v terminal-notifier >/dev/null 2>&1; then
       terminal-notifier -title "${title}" -message "${msg}" >/dev/null 2>&1 || true
     else
-      # osascript fallback
       osascript -e "display notification \"${msg}\" with title \"${title}\"" >/dev/null 2>&1 || true
     fi
   else
@@ -75,15 +71,12 @@ send_and_log() {
   log_notification "$batch" "$message"
 }
 
-# List batches
 list_batches() {
   run_sql_raw "SELECT batch_name FROM Batch ORDER BY batch_name;"
 }
 
-# default batch saved to config
 get_default_batch() {
   if [ -f "${BASE_DIR}/config/my_batch.conf" ]; then
-    # shellcheck disable=SC1090
     source "${BASE_DIR}/config/my_batch.conf"
     printf '%s' "${MY_BATCH:-}"
   else
@@ -96,7 +89,6 @@ set_default_batch() {
   echo -e "${FG_GREEN}${BOLD}Saved default batch:${RESET} ${BOLD}$1${RESET}"
 }
 
-# portable date helpers
 date_add_days() {
   if [ "${PLATFORM}" = "mac" ]; then
     date -v+"${1}"d '+%Y-%m-%d'
@@ -104,6 +96,7 @@ date_add_days() {
     date -d "+${1} day" '+%Y-%m-%d'
   fi
 }
+
 dayname_of_date() {
   local d="$1"
   if [ "${PLATFORM}" = "mac" ]; then
@@ -113,10 +106,9 @@ dayname_of_date() {
   fi
 }
 
-# epoch for YYYY-MM-DD HH:MM:SS (portable)
 epoch_from_datetime() {
-  local when_date="$1"   # YYYY-MM-DD
-  local when_time="$2"   # HH:MM:SS (or HH:MM)
+  local when_date="$1"  
+  local when_time="$2"  
   if [ "${PLATFORM}" = "mac" ]; then
     date -j -f "%Y-%m-%d %T" "${when_date} ${when_time}" '+%s' 2>/dev/null || date -j -f "%Y-%m-%d %H:%M" "${when_date} ${when_time}" '+%s' 2>/dev/null || echo 0
   else
@@ -124,7 +116,6 @@ epoch_from_datetime() {
   fi
 }
 
-# SQL queries (no stored procedures required)
 sql_today() {
   local batch="$1"
   printf "SELECT d.day_name,d.start_time,d.end_time,c.course_code,c.course_name,IFNULL(GROUP_CONCAT(tch.teacher_name SEPARATOR ', '),'') AS teachers,t.room
@@ -198,7 +189,6 @@ GROUP BY t.tt_id
 ORDER BY d.start_time;" "$batch"
 }
 
-# ---------- Auto-fit table printer (Theme C) ----------
 print_table_auto() {
   local header_line="$1"
   local -a rows
@@ -210,6 +200,7 @@ print_table_auto() {
   local -a widths
   for ((i=0;i<ncol;i++)); do widths[i]=${#headers[i]}; done
 
+  # compute column widths
   for r in "${rows[@]}"; do
     IFS=$'\t' read -ra fields <<< "$r"
     for ((i=0;i<ncol;i++)); do
@@ -220,68 +211,76 @@ print_table_auto() {
     done
   done
 
-  # compute total width and shrink if needed (basic)
+  # Shrink if terminal is small
   local termw=9999
-  if command -v tput >/dev/null 2>&1; then termw="$(tput cols 2>/dev/null || echo 9999)"; fi
+  if command -v tput >/dev/null 2>&1; then
+    termw="$(tput cols 2>/dev/null || echo 9999)"
+  fi
+
   local totalw=1
   for w in "${widths[@]}"; do totalw=$(( totalw + w + 3 )); done
+
   if (( totalw > termw )); then
-    # shrink teachers or course columns first (best-effort)
     for key in "teachers" "course_name" "code" "room"; do
       for ((i=0;i<ncol;i++)); do
-        if [[ "${headers[i],,}" == *"${key}"* ]]; then
+        if [[ "${headers[i],,}" == *"$key"* ]]; then
           widths[i]=$(( widths[i] - 10 ))
-          if (( widths[i] < 8 )); then widths[i]=8; fi
+          (( widths[i] < 8 )) && widths[i]=8
           totalw=1
           for w in "${widths[@]}"; do totalw=$(( totalw + w + 3 )); done
-          if (( totalw <= termw )); then break 2; fi
+          (( totalw <= termw )) && break 2
         fi
       done
     done
   fi
 
-  # border pieces
   local TL="╔" TR="╗" BL="╚" BR="╝" HOR="═" VER="║" TJ="╦" MJ="╬" BJ="╩"
-  # top
-  local top="${TL}"
-  for ((i=0;i<ncol;i++)); do top+=$(printf '%*s' $((widths[i]+2)) '' | tr ' ' "${HOR}"); top+=$(( i<ncol-1 ? "╦" : "" )); done
-  top="${top}${TR}"
+
+  local top="$TL"
+  for ((i=0;i<ncol;i++)); do
+    top+=$(printf '%*s' $((widths[i]+2)) '' | tr ' ' "$HOR")
+    if (( i < ncol-1 )); then top+="╦"; fi
+  done
+  top+="$TR"
   echo -e "${FG_BLUE}${BOLD}${top}${RESET}"
 
-  # header row
-  printf "%b " "${VER}"
+  printf "%b " "$VER"
   for ((i=0;i<ncol;i++)); do
-    local h="${headers[i]}"
-    printf "%b%s%b" "${BOLD}${FG_CYAN}" "$h" "${RESET}"
-    printf '%*s' $((widths[i]-${#h}+1)) ''
-    printf "%b " "${VER}"
+    printf "%b%s%b" "${FG_CYAN}${BOLD}" "${headers[i]}" "${RESET}"
+    printf '%*s' $((widths[i]-${#headers[i]}+1)) ''
+    printf "%b " "$VER"
   done
   echo
 
-  # mid separator
   local mid="╠"
-  for ((i=0;i<ncol;i++)); do mid+=$(printf '%*s' $((widths[i]+2)) '' | tr ' ' '─'); mid+=$(( i<ncol-1 ? "╬" : "" )); done
-  mid="${mid}╣"
+  for ((i=0;i<ncol;i++)); do
+    mid+=$(printf '%*s' $((widths[i]+2)) '' | tr ' ' '─')
+    if (( i < ncol-1 )); then mid+="╬"; fi
+  done
+  mid+="╣"
   echo -e "${FG_BLUE}${mid}${RESET}"
 
-  # rows
   for r in "${rows[@]}"; do
     IFS=$'\t' read -ra flds <<< "$r"
-    printf "%b " "${VER}"
+    printf "%b " "$VER"
     for ((i=0;i<ncol;i++)); do
       local val="${flds[i]:-}"
       val="$(printf '%s' "$val" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
-      if (( ${#val} > widths[i] )); then val="${val:0:$((widths[i]-1))}…"; fi
+      if (( ${#val} > widths[i] )); then
+        val="${val:0:$((widths[i]-1))}…"
+      fi
       printf "%-*s " "${widths[i]}" "$val"
-      printf "%b" "${VER}"
+      printf "%b" "$VER"
     done
     echo
   done
 
-  # bottom
-  local bot="╚"
-  for ((i=0;i<ncol;i++)); do bot+=$(printf '%*s' $((widths[i]+2)) '' | tr ' ' "${HOR}"); bot+=$(( i<ncol-1 ? "╩" : "" )); done
-  bot="${bot}╝"
+  local bot="$BL"
+  for ((i=0;i<ncol;i++)); do
+    bot+=$(printf '%*s' $((widths[i]+2)) '' | tr ' ' "$HOR")
+    if (( i < ncol-1 )); then bot+="╩"; fi
+  done
+  bot+="$BR"
   echo -e "${FG_BLUE}${BOLD}${bot}${RESET}"
 }
 
@@ -307,6 +306,64 @@ export_today_csv() {
   run_sql_raw "$(sql_today "$batch")" | awk -F'\t' '{gsub(/"/,"\"\""); printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",$1,$2,$3,$4,$5,$6,$7}' >> "$file"
   echo -e "${FG_GREEN}Exported → $file${RESET}"
 }
+
+# ---------- Add Extra Class ----------
+
+add_extra_class_today_menu() {
+  local batch="$1"
+  if [ -z "$batch" ]; then batch="$(get_default_batch)"; fi
+  if [ -z "$batch" ]; then 
+    echo -e "${FG_RED}No batch selected. Use option 9.${RESET}"
+    return
+  fi
+
+  echo -e "${BOLD}${FG_CYAN}Add Extra Class for Batch $batch (Today)${RESET}"
+
+  # ASK FOR ALL REQUIRED DETAILS
+  read -rp "Enter course code: " course
+  read -rp "Enter teacher name: " teacher_name
+  read -rp "Enter room name: " room
+
+  # CALL SQL PROCEDURE
+  local raw
+  raw=$(run_sql_raw "CALL add_extra_class_today('$batch', '$course', '$teacher_name', '$room');")
+  echo "RAW OUTPUT = '$raw'"
+
+  # CLEAN SQL OUTPUT
+  raw=$(echo "$raw" | tr -d '\r' | tr -d '\n' | xargs)
+  
+  # ERROR HANDLING
+  if [[ "$raw" == "TEACHER_NOT_FOUND" ]]; then
+      echo -e "${FG_RED}Teacher '$teacher_name' not found.${RESET}"
+      return
+  fi
+
+  if [[ "$raw" == "NO_COMMON_FREE_SLOT" ]]; then
+      echo -e "${FG_RED}No free slot available (batch + teacher + room busy).${RESET}"
+      return
+  fi
+
+  # SUCCESS — EXTRACT SLOT NUMBER
+  slot="${raw#EXTRA_CLASS_ADDED:}"
+  slot="${slot:-0}"
+
+  # FETCH SLOT TIMINGS SAFELY
+  slot_start="$(run_sql_raw "SELECT start_time FROM DaySlot WHERE slot_id=$slot LIMIT 1;" || echo "")"
+  slot_end="$(run_sql_raw "SELECT end_time FROM DaySlot WHERE slot_id=$slot LIMIT 1;" || echo "")"
+
+  # FALLBACK IF EMPTY
+  slot_start="${slot_start:-UNKNOWN}"
+  slot_end="${slot_end:-UNKNOWN}"
+
+  # DISPLAY SUCCESS MESSAGE
+  echo -e "${FG_GREEN}Extra class added in Slot $slot ($slot_start-$slot_end).${RESET}"
+
+  # LOG + NOTIFICATION
+  send_and_log "$batch" \
+"Extra class added: $course by $teacher_name | Slot $slot ($slot_start-$slot_end) | Room $room"
+}
+
+
 
 # ---------- Next class helpers ----------
 get_next_class_row() {
@@ -348,12 +405,10 @@ live_countdown_for_next() {
       echo -e "${FG_GREEN}Class has started.${RESET}"
       break
     fi
-    # notify at 10 minutes (600 seconds)
     if (( diff <= 600 && ten_notified == 0 )); then
       send_and_log "$batch" "Upcoming class in 10 minutes: ${code} - ${cname} at ${start} in ${room}"
       ten_notified=1
     fi
-    # format diff into mm:ss or hh:mm:ss
     local hours=$(( diff / 3600 ))
     local mins=$(( (diff % 3600) / 60 ))
     local secs=$(( diff % 60 ))
@@ -363,7 +418,6 @@ live_countdown_for_next() {
   echo
 }
 
-# Manual reminder: send notification for next class immediately
 manual_reminder_now() {
   local batch="$1"
   if [ -z "$batch" ]; then batch="$(get_default_batch)"; fi
@@ -377,9 +431,9 @@ manual_reminder_now() {
   echo -e "${FG_GREEN}Reminder sent.${RESET}"
 }
 
-# Choose batch menu
 choose_batch_menu() {
-  local def; def="$(get_default_batch)"
+  local def; 
+  def="$(get_default_batch)"
   echo -e "${BOLD}Available batches:${RESET}"
   local -a items; local idx=0
   while IFS= read -r b; do
@@ -401,7 +455,6 @@ choose_batch_menu() {
   return 0
 }
 
-# ---------------- Main interactive loop ----------------
 while true; do
   clear
   current_batch="$(get_default_batch)"
@@ -411,7 +464,8 @@ while true; do
   echo -e "${FG_BLUE} 1)${RESET} ${FG_CYAN}Today${RESET}      ${FG_BLUE}2)${RESET} ${FG_CYAN}Tomorrow${RESET}   ${FG_BLUE}3)${RESET} ${FG_CYAN}Week${RESET}"
   echo -e "${FG_BLUE} 4)${RESET} ${FG_CYAN}Next class${RESET} ${FG_BLUE}5)${RESET} ${FG_CYAN}Now${RESET}       ${FG_BLUE}6)${RESET} ${FG_CYAN}Countdown (next)${RESET}"
   echo -e "${FG_BLUE} 7)${RESET} ${FG_CYAN}Manual reminder${RESET}  ${FG_BLUE}8)${RESET} ${FG_CYAN}Export Today (CSV)${RESET}"
-  echo -e "${FG_BLUE} 9)${RESET} ${FG_CYAN}Change batch${RESET}  ${FG_BLUE}0)${RESET} ${FG_RED}Exit${RESET}"
+  echo -e "${FG_BLUE} 9)${RESET} ${FG_CYAN}Change batch${RESET}  ${FG_BLUE}0)${RESET} ${FG_RED}Exit${RESET}     ${FG_BLUE}10)${RESET} ${FG_CYAN}Add Extra Class (Today)${RESET}"
+
   echo
   read -rp $'Choose option [0-9]: ' opt
   case "$opt" in
@@ -452,6 +506,10 @@ while true; do
     9)
       choose_batch_menu
       ;;
+    10)
+      add_extra_class_today_menu "$current_batch"
+      ;;
+
     0)
       echo -e "${FG_GREEN}Bye!${RESET}"
       exit 0
